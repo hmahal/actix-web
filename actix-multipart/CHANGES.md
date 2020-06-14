@@ -1,5 +1,17 @@
 # Changes
 
+## [0.3.0-alpha.1] - 2020-05-25
+
+* Update `actix-web` to 3.0.0-alpha.3
+
+* Bump minimum supported Rust version to 1.40
+
+* Minimize `futures` dependencies
+
+* Remove the unused `time` dependency
+
+* Fix missing `std::error::Error` implement for `MultipartError`.
+
 ## [0.2.0] - 2019-12-20
 
 * Release
