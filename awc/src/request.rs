@@ -1,16 +1,14 @@
 use std::convert::TryFrom;
-use std::fmt::Write as FmtWrite;
 use std::rc::Rc;
 use std::time::Duration;
 use std::{fmt, net};
 
 use bytes::Bytes;
 use futures_core::Stream;
-use percent_encoding::percent_encode;
 use serde::Serialize;
 
 use actix_http::body::Body;
-use actix_http::cookie::{Cookie, CookieJar, USERINFO};
+use actix_http::cookie::{Cookie, CookieJar};
 use actix_http::http::header::{self, Header, IntoHeaderValue};
 use actix_http::http::{
     uri, ConnectionType, Error as HttpError, HeaderMap, HeaderName, HeaderValue, Method,
@@ -23,10 +21,15 @@ use crate::frozen::FrozenClientRequest;
 use crate::sender::{PrepForSendingError, RequestSender, SendClientRequest};
 use crate::ClientConfig;
 
-#[cfg(any(feature = "flate2-zlib", feature = "flate2-rust"))]
-const HTTPS_ENCODING: &str = "br, gzip, deflate";
-#[cfg(not(any(feature = "flate2-zlib", feature = "flate2-rust")))]
-const HTTPS_ENCODING: &str = "br";
+cfg_if::cfg_if! {
+    if #[cfg(any(feature = "flate2-zlib", feature = "flate2-rust"))] {
+        const HTTPS_ENCODING: &str = "br, gzip, deflate";
+    } else if #[cfg(feature = "compress")] {
+        const HTTPS_ENCODING: &str = "br";
+    } else {
+        const HTTPS_ENCODING: &str = "identity";
+    }
+}
 
 /// An HTTP Client request builder
 ///
@@ -351,8 +354,9 @@ impl ClientRequest {
         self
     }
 
-    /// This method calls provided closure with builder reference if
-    /// value is `true`.
+    /// This method calls provided closure with builder reference if value is `true`.
+    #[doc(hidden)]
+    #[deprecated = "Use an if statement."]
     pub fn if_true<F>(self, value: bool, f: F) -> Self
     where
         F: FnOnce(ClientRequest) -> ClientRequest,
@@ -364,8 +368,9 @@ impl ClientRequest {
         }
     }
 
-    /// This method calls provided closure with builder reference if
-    /// value is `Some`.
+    /// This method calls provided closure with builder reference if value is `Some`.
+    #[doc(hidden)]
+    #[deprecated = "Use an if-let construction."]
     pub fn if_some<T, F>(self, value: Option<T>, f: F) -> Self
     where
         F: FnOnce(T, ClientRequest) -> ClientRequest,
@@ -527,16 +532,18 @@ impl ClientRequest {
 
         // set cookies
         if let Some(ref mut jar) = self.cookies {
-            let mut cookie = String::new();
-            for c in jar.delta() {
-                let name = percent_encode(c.name().as_bytes(), USERINFO);
-                let value = percent_encode(c.value().as_bytes(), USERINFO);
-                let _ = write!(&mut cookie, "; {}={}", name, value);
+            let cookie: String = jar
+                .delta()
+                // ensure only name=value is written to cookie header
+                .map(|c| Cookie::new(c.name(), c.value()).encoded().to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+
+            if !cookie.is_empty() {
+                self.head
+                    .headers
+                    .insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
             }
-            self.head.headers.insert(
-                header::COOKIE,
-                HeaderValue::from_str(&cookie.as_str()[2..]).unwrap(),
-            );
         }
 
         let mut slf = self;
@@ -586,30 +593,37 @@ mod tests {
     use super::*;
     use crate::Client;
 
-    #[test]
-    fn test_debug() {
+    #[actix_rt::test]
+    async fn test_debug() {
         let request = Client::new().get("/").header("x-test", "111");
         let repr = format!("{:?}", request);
         assert!(repr.contains("ClientRequest"));
         assert!(repr.contains("x-test"));
     }
 
-    #[test]
-    fn test_basics() {
-        let mut req = Client::new()
+    #[actix_rt::test]
+    async fn test_basics() {
+        let req = Client::new()
             .put("/")
             .version(Version::HTTP_2)
             .set(header::Date(SystemTime::now().into()))
             .content_type("plain/text")
-            .if_true(true, |req| req.header(header::SERVER, "awc"))
-            .if_true(false, |req| req.header(header::EXPECT, "awc"))
-            .if_some(Some("server"), |val, req| {
-                req.header(header::USER_AGENT, val)
-            })
-            .if_some(Option::<&str>::None, |_, req| {
-                req.header(header::ALLOW, "1")
-            })
-            .content_length(100);
+            .header(header::SERVER, "awc");
+
+        let req = if let Some(val) = Some("server") {
+            req.header(header::USER_AGENT, val)
+        } else {
+            req
+        };
+
+        let req = if let Some(_val) = Option::<&str>::None {
+            req.header(header::ALLOW, "1")
+        } else {
+            req
+        };
+
+        let mut req = req.content_length(100);
+
         assert!(req.headers().contains_key(header::CONTENT_TYPE));
         assert!(req.headers().contains_key(header::DATE));
         assert!(req.headers().contains_key(header::SERVER));
@@ -617,13 +631,14 @@ mod tests {
         assert!(!req.headers().contains_key(header::ALLOW));
         assert!(!req.headers().contains_key(header::EXPECT));
         assert_eq!(req.head.version, Version::HTTP_2);
+
         let _ = req.headers_mut();
         let _ = req.send_body("");
     }
 
-    #[test]
-    fn test_client_header() {
-        let req = Client::build()
+    #[actix_rt::test]
+    async fn test_client_header() {
+        let req = Client::builder()
             .header(header::CONTENT_TYPE, "111")
             .finish()
             .get("/");
@@ -639,9 +654,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_client_header_override() {
-        let req = Client::build()
+    #[actix_rt::test]
+    async fn test_client_header_override() {
+        let req = Client::builder()
             .header(header::CONTENT_TYPE, "111")
             .finish()
             .get("/")
@@ -658,8 +673,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn client_basic_auth() {
+    #[actix_rt::test]
+    async fn client_basic_auth() {
         let req = Client::new()
             .get("/")
             .basic_auth("username", Some("password"));
@@ -685,8 +700,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn client_bearer_auth() {
+    #[actix_rt::test]
+    async fn client_bearer_auth() {
         let req = Client::new().get("/").bearer_auth("someS3cr3tAutht0k3n");
         assert_eq!(
             req.head
@@ -699,8 +714,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn client_query() {
+    #[actix_rt::test]
+    async fn client_query() {
         let req = Client::new()
             .get("/")
             .query(&[("key1", "val1"), ("key2", "val2")])

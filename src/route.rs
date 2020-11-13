@@ -1,3 +1,5 @@
+#![allow(clippy::rc_buffer)] // inner value is mutated before being shared (`Rc::get_mut`)
+
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -46,6 +48,7 @@ pub struct Route {
 
 impl Route {
     /// Create new route which matches any request.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Route {
         Route {
             service: Box::new(RouteNewService::new(Extract::new(Handler::new(|| {
@@ -361,13 +364,13 @@ mod tests {
             App::new()
                 .service(
                     web::resource("/test")
-                        .route(web::get().to(|| HttpResponse::Ok()))
+                        .route(web::get().to(HttpResponse::Ok))
                         .route(web::put().to(|| async {
                             Err::<HttpResponse, _>(error::ErrorBadRequest("err"))
                         }))
                         .route(web::post().to(|| async {
                             delay_for(Duration::from_millis(100)).await;
-                            HttpResponse::Created()
+                            Ok::<_, ()>(HttpResponse::Created())
                         }))
                         .route(web::delete().to(|| async {
                             delay_for(Duration::from_millis(100)).await;
